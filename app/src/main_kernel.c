@@ -1,3 +1,4 @@
+#include<zephyr.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
