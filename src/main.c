@@ -13,6 +13,11 @@ static struct k_thread parser_thread;
  * Parser thread: receives three packets and parses them.
  * The first is a normal command, the other two are an attacker's commands,
  * each reading 16 bytes of the key.
+ *
+ * This thread runs in user mode (K_USER). The MPU prevents user threads from
+ * accessing memory that has not been explicitly granted to them, such as the
+ * device key stored in kernel RAM. The out-of-bounds read in parse_command()
+ * will therefore cause an MPU fault before it can reach the key.
  */
 static void parser_entry(void *attack_index, void *p2, void *p3)
 {
@@ -36,8 +41,14 @@ int main(void)
 	long attack_index = ((const char *)credentials_key_addr() -
 			     (const char *)parser_settings_addr()) / SETTING_SIZE;
 
+	/*
+	 * K_USER makes this a user-space thread. Zephyr's MPU grants user
+	 * threads access only to their own stack and to memory partitions
+	 * explicitly added to their domain. The device key (in kernel RAM)
+	 * is not in the parser's domain, so the out-of-bounds read faults.
+	 */
 	k_thread_create(&parser_thread, parser_stack, PARSER_STACK_SIZE,
 			parser_entry, (void *)attack_index, NULL, NULL,
-			5, 0, K_NO_WAIT);
+			5, K_USER, K_NO_WAIT);
 	return 0;
 }
