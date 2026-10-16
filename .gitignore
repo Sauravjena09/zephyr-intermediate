@@ -6,3 +6,8 @@ build
 deps
 project_layout.txt
 .cache
+
+# Twister output (exclude everything except the coverage report for Task 3)
+twister-out/*
+!twister-out/coverage/
+twister-out.*
