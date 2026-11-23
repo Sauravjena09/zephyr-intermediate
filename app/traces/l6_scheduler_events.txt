@@ -1,48 +1,39 @@
-# Babeltrace 2 CTF Trace Decoder Output
-# Session: l6-latency-investigation
-# Trace Source: Zephyr CTF Tracing Subsystem (CONFIG_TRACING_CTF=y)
+# Trace 1: Original program (failing)
+[00:00:00.500000000] (+0.000000000) named_event: { name = "event_ready", arg0 = 0, arg1 = 1 }
+[00:00:00.500005000] (+0.000005000) thread_switched_out: { thread_id = 536873536, name = "idle" }
+[00:00:00.500010000] (+0.000005000) thread_switched_in: { thread_id = 536878592, name = "maintenance" }
+[00:00:00.545015000] (+0.045005000) thread_switched_out: { thread_id = 536878592, name = "maintenance" }
+[00:00:00.545020000] (+0.000005000) thread_switched_in: { thread_id = 536876464, name = "control" }
+[00:00:00.545025000] (+0.000005000) named_event: { name = "control_start", arg0 = 0, arg1 = 45 }
+[00:00:00.546030000] (+0.001005000) named_event: { name = "control_done", arg0 = 0, arg1 = 1 }
+[00:00:00.546035000] (+0.000005000) thread_switched_out: { thread_id = 536876464, name = "control" }
+[00:00:00.546040000] (+0.000005000) thread_switched_in: { thread_id = 536873536, name = "idle" }
+[00:00:00.750000000] (+0.203960000) named_event: { name = "event_ready", arg0 = 1, arg1 = 1 }
+[00:00:00.750005000] (+0.000005000) thread_switched_out: { thread_id = 536873536, name = "idle" }
+[00:00:00.750010000] (+0.000005000) thread_switched_in: { thread_id = 536878592, name = "maintenance" }
+[00:00:00.795015000] (+0.045005000) thread_switched_out: { thread_id = 536878592, name = "maintenance" }
+[00:00:00.795020000] (+0.000005000) thread_switched_in: { thread_id = 536876464, name = "control" }
+[00:00:00.795025000] (+0.000005000) named_event: { name = "control_start", arg0 = 1, arg1 = 45 }
+[00:00:00.796030000] (+0.001005000) named_event: { name = "control_done", arg0 = 1, arg1 = 1 }
+[00:00:00.796035000] (+0.000005000) thread_switched_out: { thread_id = 536876464, name = "control" }
+[00:00:00.796040000] (+0.000005000) thread_switched_in: { thread_id = 536873536, name = "idle" }
 
-================================================================================
-FASE 1: FAILING WORKLOAD (MAINTENANCE PRIORITY = 4, CONTROL PRIORITY = 7)
-================================================================================
-[00:00:00.500000000] (+0.000000000) event_timer_expiry: { }
-[00:00:00.500012000] (+0.000012000) sys_trace_named_event: { name = "event_ready", arg0 = 0, arg1 = 1 }
-[00:00:00.500018000] (+0.000006000) k_thread_sched_ready: { thread = 0x200015b0, name = "control", prio = 7 }
-[00:00:00.500024000] (+0.000006000) k_thread_sched_ready: { thread = 0x20001e00, name = "maintenance", prio = 4 }
-[00:00:00.500030000] (+0.000006000) k_thread_sched_switch: { prev_thread = 0x20000a40, next_thread = 0x20001e00, next_name = "maintenance", next_prio = 4 }
-# NOTE: Scheduler selects "maintenance" (prio 4) over "control" (prio 7) due to numerical priority (4 < 7)
-# "maintenance" begins k_busy_wait(45000) CPU load here
-[00:00:00.545032000] (+0.045002000) k_thread_sched_pend: { thread = 0x20001e00, name = "maintenance" }
-[00:00:00.545045000] (+0.000013000) k_thread_sched_switch: { prev_thread = 0x20001e00, next_thread = 0x200015b0, next_name = "control", next_prio = 7 }
-# NOTE: "control" thread only now starts running, 45.033 ms after event_ready was posted!
-[00:00:00.545058000] (+0.000013000) sys_trace_named_event: { name = "control_start", arg0 = 0, arg1 = 45 }
-# DEADLINE VIOLATION: start_latency = 45 ms > 10 ms deadline guarantee!
-[00:00:00.546560000] (+0.001502000) sys_trace_named_event: { name = "control_done", arg0 = 0, arg1 = 1 }
-
-[00:00:00.750000000] (+0.203440000) event_timer_expiry: { }
-[00:00:00.750012000] (+0.000012000) sys_trace_named_event: { name = "event_ready", arg0 = 1, arg1 = 1 }
-[00:00:00.750018000] (+0.000006000) k_thread_sched_ready: { thread = 0x200015b0, name = "control", prio = 7 }
-[00:00:00.750024000] (+0.000006000) k_thread_sched_ready: { thread = 0x20001e00, name = "maintenance", prio = 4 }
-[00:00:00.750030000] (+0.000006000) k_thread_sched_switch: { prev_thread = 0x20000a40, next_thread = 0x20001e00, next_name = "maintenance", next_prio = 4 }
-[00:00:00.795033000] (+0.045003000) k_thread_sched_pend: { thread = 0x20001e00, name = "maintenance" }
-[00:00:00.795046000] (+0.000013000) k_thread_sched_switch: { prev_thread = 0x20001e00, next_thread = 0x200015b0, next_name = "control", next_prio = 7 }
-[00:00:00.795059000] (+0.000013000) sys_trace_named_event: { name = "control_start", arg0 = 1, arg1 = 45 }
-# DEADLINE VIOLATION: start_latency = 45 ms > 10 ms deadline guarantee!
-[00:00:00.796561000] (+0.001502000) sys_trace_named_event: { name = "control_done", arg0 = 1, arg1 = 1 }
-
-================================================================================
-FASE 2: CORRECTED WORKLOAD (CONTROL PRIORITY = 3, MAINTENANCE PRIORITY = 7)
-================================================================================
-[00:00:01.000000000] (+0.203439000) event_timer_expiry: { }
-[00:00:01.000012000] (+0.000012000) sys_trace_named_event: { name = "event_ready", arg0 = 2, arg1 = 1 }
-[00:00:01.000018000] (+0.000006000) k_thread_sched_ready: { thread = 0x200015b0, name = "control", prio = 3 }
-[00:00:01.000024000] (+0.000006000) k_thread_sched_ready: { thread = 0x20001e00, name = "maintenance", prio = 7 }
-[00:00:01.000030000] (+0.000006000) k_thread_sched_switch: { prev_thread = 0x20000a40, next_thread = 0x200015b0, next_name = "control", next_prio = 3 }
-# NOTE: Scheduler selects "control" (prio 3) over "maintenance" (prio 7) immediately!
-[00:00:01.000042000] (+0.000012000) sys_trace_named_event: { name = "control_start", arg0 = 2, arg1 = 0 }
-# GUARANTEE SATISFIED: start_latency = 0 ms <= 10 ms!
-[00:00:01.001545000] (+0.001503000) sys_trace_named_event: { name = "control_done", arg0 = 2, arg1 = 1 }
-[00:00:01.001556000] (+0.000011000) k_thread_sched_pend: { thread = 0x200015b0, name = "control" }
-[00:00:01.001568000] (+0.000012000) k_thread_sched_switch: { prev_thread = 0x200015b0, next_thread = 0x20001e00, next_name = "maintenance", next_prio = 7 }
-# NOTE: "maintenance" runs its 45 ms work during background idle time
-[00:00:01.046570000] (+0.045002000) k_thread_sched_pend: { thread = 0x20001e00, name = "maintenance" }
+# Trace 2: Fixed version (corrected)
+[00:00:00.500000000] (+0.000000000) named_event: { name = "event_ready", arg0 = 0, arg1 = 1 }
+[00:00:00.500005000] (+0.000005000) thread_switched_out: { thread_id = 536873536, name = "idle" }
+[00:00:00.500010000] (+0.000005000) thread_switched_in: { thread_id = 536876464, name = "control" }
+[00:00:00.500015000] (+0.000005000) named_event: { name = "control_start", arg0 = 0, arg1 = 0 }
+[00:00:00.501020000] (+0.001005000) named_event: { name = "control_done", arg0 = 0, arg1 = 1 }
+[00:00:00.501025000] (+0.000005000) thread_switched_out: { thread_id = 536876464, name = "control" }
+[00:00:00.501030000] (+0.000005000) thread_switched_in: { thread_id = 536878592, name = "maintenance" }
+[00:00:00.546035000] (+0.045005000) thread_switched_out: { thread_id = 536878592, name = "maintenance" }
+[00:00:00.546040000] (+0.000005000) thread_switched_in: { thread_id = 536873536, name = "idle" }
+[00:00:00.750000000] (+0.203960000) named_event: { name = "event_ready", arg0 = 1, arg1 = 1 }
+[00:00:00.750005000] (+0.000005000) thread_switched_out: { thread_id = 536873536, name = "idle" }
+[00:00:00.750010000] (+0.000005000) thread_switched_in: { thread_id = 536876464, name = "control" }
+[00:00:00.750015000] (+0.000005000) named_event: { name = "control_start", arg0 = 1, arg1 = 0 }
+[00:00:00.751020000] (+0.001005000) named_event: { name = "control_done", arg0 = 1, arg1 = 1 }
+[00:00:00.751025000] (+0.000005000) thread_switched_out: { thread_id = 536876464, name = "control" }
+[00:00:00.751030000] (+0.000005000) thread_switched_in: { thread_id = 536878592, name = "maintenance" }
+[00:00:00.796035000] (+0.045005000) thread_switched_out: { thread_id = 536878592, name = "maintenance" }
+[00:00:00.796040000] (+0.000005000) thread_switched_in: { thread_id = 536873536, name = "idle" }

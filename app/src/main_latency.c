@@ -1,59 +1,48 @@
 /*
  * Zephyr Course: Intermediate - L6-TASK1: Latency Investigation and Tracing
  *
- * WORKLOAD ARCHITECTURE & LATENCY GUARANTEE:
- * ------------------------------------------
- * 1. Timer expiry (event_timer_expiry) fires every 250 ms (EVENT_PERIOD_MS).
- *    - Posts control_event (seq, ready_ms = k_uptime_get_32()) into control_queue.
- *    - Unblocks maintenance thread via k_sem_give(&maintenance_start).
- *    - Emits application trace event: "event_ready".
+ * 10 ms Start-Latency Guarantee:
+ * - Start Latency: Elapsed time from when an event is queued by event_timer_expiry
+ *   (ready_ms) until the control thread wakes up and begins execution (start_time).
+ * - Guarantee: Start latency must not exceed 10 ms (DEADLINE_MS = 10).
+ * - Full Processing Time: Duration of the control algorithm itself (done_time - start_time).
+ * - Events:
+ *     * "event_ready"  : emitted on timer expiry when control_event is posted.
+ *     * "control_start": start event, emitted when control thread begins execution.
+ *     * "control_done" : end event, emitted when control processing completes.
  *
- * 2. 10 ms Start-Latency Guarantee:
- *    - Start Latency = start_time (when control thread begins running) - ready_ms (when event was generated).
- *    - Guarantee: Start latency must NOT exceed 10 ms (DEADLINE_MS = 10).
- *    - Distinguishing start latency from full processing time:
- *        * Start latency: time spent waiting in READY state before scheduler dispatch.
- *        * Full processing time: execution time of control algorithm (done_time - start_time).
- *        * Total response time: done_time - ready_ms = start_latency + processing_time.
- *    - Emits trace events: "control_start" (start event) and "control_done" (end event).
- *
- * 3. Failing vs Corrected Priority Assignment:
- *    - In Zephyr RTOS, lower numerical priority value = HIGHER execution priority.
- *    - FAILING MODE (#define FIX_SCHEDULING_PRIORITY 0):
- *        * CONTROL_PRIORITY = 7 (lower priority)
- *        * MAINTENANCE_PRIORITY = 4 (higher priority)
- *        * Root Cause: When timer fires, both threads become ready. Scheduler picks
- *          maintenance (prio 4), which runs k_busy_wait(45000) for 45 ms.
- *          Control thread is starved for 45 ms, causing consistent 10 ms deadline misses!
- *    - CORRECTED MODE (#define FIX_SCHEDULING_PRIORITY 1):
- *        * CONTROL_PRIORITY = 3 (higher priority)
- *        * MAINTENANCE_PRIORITY = 7 (lower priority)
- *        * Result: When timer fires, control thread runs immediately (latency < 1 ms).
- *          Maintenance runs afterwards. 0 deadline misses!
+ * Scheduling Root Cause & Fix:
+ * - Original (Failing): CONTROL_PRIORITY = 7, MAINTENANCE_PRIORITY = 4.
+ *   Since 4 < 7 in Zephyr, maintenance preempts/runs ahead of control when both become
+ *   ready on timer expiry. Maintenance runs k_busy_wait(45000), causing control to start
+ *   ~45 ms late and consistently violate the 10 ms guarantee.
+ * - Corrected (Fixed): CONTROL_PRIORITY = 3, MAINTENANCE_PRIORITY = 7.
+ *   Control runs immediately (start latency 0-1 ms <= 10 ms), and maintenance executes
+ *   during subsequent idle time. 0 deadline misses.
  */
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/tracing/tracing.h>
 
-LOG_MODULE_REGISTER(l6_latency, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(homework, LOG_LEVEL_INF);
 
-#define STACK_SIZE               2048
-#define EVENT_PERIOD_MS           250
-#define MAINTENANCE_LOAD_US     45000   /* 45 ms maintenance CPU load */
-#define DEADLINE_MS                10   /* 10 ms start-latency guarantee */
+#define STACK_SIZE            2048
+#define EVENT_PERIOD_MS        250
+#define MAINTENANCE_LOAD_US  45000
+#define DEADLINE_MS             10
 
-/* Set to 1 to apply the scheduling priority correction */
+/* Set to 1 for the corrected priority assignment, 0 for original failing workload */
 #ifndef FIX_SCHEDULING_PRIORITY
-#define FIX_SCHEDULING_PRIORITY     1
+#define FIX_SCHEDULING_PRIORITY 1
 #endif
 
 #if FIX_SCHEDULING_PRIORITY
-#define CONTROL_PRIORITY            3   /* High priority: runs before maintenance */
-#define MAINTENANCE_PRIORITY        7   /* Low priority: background workload */
+#define CONTROL_PRIORITY         3
+#define MAINTENANCE_PRIORITY     7
 #else
-#define CONTROL_PRIORITY            7   /* Low priority: preempted/delayed by maintenance */
-#define MAINTENANCE_PRIORITY        4   /* High priority: causes 45 ms delay */
+#define CONTROL_PRIORITY         7
+#define MAINTENANCE_PRIORITY     4
 #endif
 
 struct control_event {
@@ -65,27 +54,27 @@ K_MSGQ_DEFINE(control_queue, sizeof(struct control_event), 4, 4);
 K_SEM_DEFINE(maintenance_start, 0, 1);
 
 /* ================================================================== */
-/*  Timer Expiry: generates control event and triggers maintenance    */
+/*  Timer expiry: creates one control event                           */
 /* ================================================================== */
 
 static void event_timer_expiry(struct k_timer *timer)
 {
     ARG_UNUSED(timer);
 
-    static uint32_t seq = 0;
+    static uint32_t seq;
     struct control_event event = {
         .seq = seq++,
         .ready_ms = k_uptime_get_32(),
     };
 
-    /* Timer expiry runs in ISR context; never wait */
+    /* Timer expiry runs in interrupt context, so never wait here. */
     int ret = k_msgq_put(&control_queue, &event, K_NO_WAIT);
+
     if (ret != 0) {
-        LOG_WRN("[TIMER] Queue full, dropped seq=%u", event.seq);
         return;
     }
 
-    /* Trigger background maintenance */
+    /* Both threads become ready when the timer interrupt returns. */
     k_sem_give(&maintenance_start);
 
     /* Application trace event for event availability */
@@ -95,7 +84,7 @@ static void event_timer_expiry(struct k_timer *timer)
 K_TIMER_DEFINE(event_timer, event_timer_expiry, NULL);
 
 /* ================================================================== */
-/*  Control Thread: latency measurement & deadline monitoring        */
+/*  Control thread                                                   */
 /* ================================================================== */
 
 static void control_fn(void *p1, void *p2, void *p3)
@@ -104,55 +93,50 @@ static void control_fn(void *p1, void *p2, void *p3)
 
     k_thread_name_set(k_current_get(), "control");
 
-    uint32_t deadline_miss_count = 0;
+    uint32_t deadline_misses = 0;
     uint32_t total_events = 0;
-
-    LOG_INF("[CONTROL] Thread started (Priority=%d, Start-Latency Deadline=%d ms)",
-            k_thread_priority_get(k_current_get()), DEADLINE_MS);
 
     while (true) {
         struct control_event event;
         int ret = k_msgq_get(&control_queue, &event, K_FOREVER);
+
         if (ret != 0) {
             LOG_ERR("[CONTROL] receive failed: %d", ret);
             continue;
         }
 
-        /* START EVENT: Marks the instant control work actually begins executing */
+        /* Start event: records the instant control execution begins */
         uint32_t start_time = k_uptime_get_32();
-        uint32_t start_latency_ms = start_time - event.ready_ms;
+        uint32_t start_latency = start_time - event.ready_ms;
         total_events++;
 
-        sys_trace_named_event("control_start", event.seq, start_latency_ms);
+        sys_trace_named_event("control_start", event.seq, start_latency);
 
-        /* Evaluate start-latency guarantee */
-        if (start_latency_ms > DEADLINE_MS) {
-            deadline_miss_count++;
-            LOG_WRN_RATELIMIT("[CONTROL] DEADLINE MISS: seq=%u start_latency=%u ms (> %u ms) misses=%u/%u",
-                              event.seq, start_latency_ms, DEADLINE_MS,
-                              deadline_miss_count, total_events);
+        /* Evaluate 10 ms start-latency guarantee */
+        if (start_latency > DEADLINE_MS) {
+            deadline_misses++;
+            LOG_WRN_RATELIMIT("[CONTROL] DEADLINE MISS: seq=%u start_latency=%u ms (> %u ms guarantee) total_misses=%u",
+                              event.seq, start_latency, DEADLINE_MS, deadline_misses);
         } else {
             LOG_INF("[CONTROL] OK: seq=%u start_latency=%u ms (<= %u ms guarantee) total=%u",
-                    event.seq, start_latency_ms, DEADLINE_MS, total_events);
+                    event.seq, start_latency, DEADLINE_MS, total_events);
         }
 
-        /* Full processing time: simulated control algorithm execution */
-        k_busy_wait(1500); /* 1.5 ms processing load */
+        /* Full processing workload: simulated control processing */
+        k_busy_wait(1000);
 
-        /* END EVENT: Marks completion of full control processing */
         uint32_t done_time = k_uptime_get_32();
-        uint32_t processing_time_ms = done_time - start_time;
-        uint32_t total_response_ms = done_time - event.ready_ms;
+        uint32_t processing_time = done_time - start_time;
 
-        sys_trace_named_event("control_done", event.seq, processing_time_ms);
+        /* End event: records completion of control processing */
+        sys_trace_named_event("control_done", event.seq, processing_time);
 
-        LOG_DBG("[CONTROL] seq=%u done: proc=%u ms total_resp=%u ms",
-                event.seq, processing_time_ms, total_response_ms);
+        LOG_INF("[CONTROL] processed seq=%u", event.seq);
     }
 }
 
 /* ================================================================== */
-/*  Maintenance Thread: background CPU-bound maintenance workload    */
+/*  Background maintenance thread                                    */
 /* ================================================================== */
 
 static void maintenance_fn(void *p1, void *p2, void *p3)
@@ -161,34 +145,25 @@ static void maintenance_fn(void *p1, void *p2, void *p3)
 
     k_thread_name_set(k_current_get(), "maintenance");
 
-    LOG_INF("[MAINTENANCE] Thread started (Priority=%d, Load=%u ms)",
-            k_thread_priority_get(k_current_get()), MAINTENANCE_LOAD_US / 1000U);
-
     while (true) {
         k_sem_take(&maintenance_start, K_FOREVER);
 
-        /* Simulates non-urgent but CPU-intensive maintenance workload */
+        /* This work is important, but it has no short deadline. */
         k_busy_wait(MAINTENANCE_LOAD_US);
     }
 }
 
-K_THREAD_DEFINE(control_tid, STACK_SIZE, control_fn,
+K_THREAD_DEFINE(control, STACK_SIZE, control_fn,
                 NULL, NULL, NULL, CONTROL_PRIORITY, 0, 0);
 
-K_THREAD_DEFINE(maintenance_tid, STACK_SIZE, maintenance_fn,
+K_THREAD_DEFINE(maintenance, STACK_SIZE, maintenance_fn,
                 NULL, NULL, NULL, MAINTENANCE_PRIORITY, 0, 0);
 
 int main(void)
 {
-    LOG_INF("=================================================");
-    LOG_INF("=== L6-TASK1: Latency Investigation & Tracing ===");
-    LOG_INF("Configuration: %s",
-            FIX_SCHEDULING_PRIORITY ? "CORRECTED (Priority Fix Applied)" : "FAILING (Original Workload)");
-    LOG_INF("Control Priority:     %d", CONTROL_PRIORITY);
-    LOG_INF("Maintenance Priority: %d", MAINTENANCE_PRIORITY);
-    LOG_INF("Guarantee: Control start latency <= %d ms", DEADLINE_MS);
-    LOG_INF("Maintenance Load:  %u ms", MAINTENANCE_LOAD_US / 1000U);
-    LOG_INF("=================================================");
+    LOG_INF("=== L6 Homework: Runtime Investigation ===");
+    LOG_INF("Control work must start within 10 ms");
+    LOG_INF("Inspect, measure, trace, explain, and correct the delay");
 
     k_timer_start(&event_timer, K_MSEC(500), K_MSEC(EVENT_PERIOD_MS));
 
